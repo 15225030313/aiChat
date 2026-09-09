@@ -1,0 +1,15 @@
+/* 全局基础样式：简约风格，后续可整体替换主题 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  font-family: 'PingFang SC', 'Microsoft YaHei', -apple-system, sans-serif;
+  background: #f5f7fa;
+  color: #1f2329;
+}
