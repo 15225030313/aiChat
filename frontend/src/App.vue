@@ -8,6 +8,10 @@
 import { ref, nextTick, watch } from 'vue'
 import { useChat } from './composables/useChat'
 import { renderMarkdown } from './utils/markdown'
+import KnowledgePanel from './components/KnowledgePanel.vue'
+
+/** 顶部导航：对话 / 知识库（后续页面多了再换 vue-router） */
+const activeTab = ref<'chat' | 'kb'>('chat')
 
 const { messages, isLoading, error, ttft, sendMessage, stopGeneration, clearMessages } = useChat()
 
@@ -69,9 +73,16 @@ async function backToBottom() {
         <span class="logo-dot" />
         <h1>企业知识库AI问答系统</h1>
       </div>
-      <span v-if="ttft" class="ttft" title="首字延迟 Time To First Token">TTFT {{ ttft }}ms</span>
-      <button class="ghost-btn" :disabled="!messages.length" @click="clearMessages">清空对话</button>
+      <nav class="tab-nav">
+        <button class="tab-item" :class="{ active: activeTab === 'chat' }" @click="activeTab = 'chat'">对话</button>
+        <button class="tab-item" :class="{ active: activeTab === 'kb' }" @click="activeTab = 'kb'">知识库</button>
+      </nav>
+      <button v-if="activeTab === 'chat'" class="ghost-btn" :disabled="!messages.length" @click="clearMessages">清空对话</button>
     </header>
+
+    <KnowledgePanel v-if="activeTab === 'kb'" />
+    <template v-else>
+    <span v-if="ttft" class="ttft" title="首字延迟 Time To First Token">TTFT {{ ttft }}ms</span>
 
     <main ref="listRef" class="chat-list" @scroll="handleScroll">
       <div v-if="!messages.length" class="empty-tip">
@@ -129,6 +140,7 @@ async function backToBottom() {
         </div>
       </div>
     </footer>
+    </template>
   </div>
 </template>
 
@@ -169,6 +181,32 @@ async function backToBottom() {
 .chat-header h1 {
   font-size: 17px;
   font-weight: 500;
+}
+
+.tab-nav {
+  display: flex;
+  gap: 4px;
+  background: #f0f2f5;
+  border-radius: 999px;
+  padding: 3px;
+}
+
+.tab-item {
+  border: none;
+  background: transparent;
+  border-radius: 999px;
+  padding: 5px 16px;
+  font-size: 13px;
+  color: #606266;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.tab-item.active {
+  background: #fff;
+  color: #16b8a6;
+  font-weight: 500;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
 }
 
 .ttft {

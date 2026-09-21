@@ -12,10 +12,13 @@ import os
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+from rag.kb_store import add_document, clear_documents, delete_document, list_documents, save_upload_file
+from rag.parse import chunk_text, parse_file
 
 load_dotenv()
 
@@ -48,6 +51,67 @@ class ChatRequest(BaseModel):
 def health():
     """健康检查，前端/部署监控都用它"""
     return {"status": "ok", "model": DEEPSEEK_MODEL}
+
+
+# ===== 知识库管理 API（阶段二：供管理页与后续 RAG 问答使用）=====
+
+ALLOWED_SUFFIXES = {"pdf"}  # Word/TXT 解析为用户练习任务，完成后在此放开
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10MB
+
+
+@app.post("/api/kb/upload")
+async def kb_upload(file: UploadFile = File(...)):
+    """上传文档 → 解析 → 分片 → 入库（第7周将在此链路后追加向量化）"""
+    suffix = (file.filename or "").rsplit(".", 1)[-1].lower()
+    if suffix not in ALLOWED_SUFFIXES:
+        raise HTTPException(status_code=400, detail=f"暂不支持 .{suffix} 格式，当前仅支持 PDF")
+
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="文件超过 10MB 上限")
+
+    save_upload_file(file.filename or "unnamed.pdf", content)  # 原始文件留档
+    try:
+        text = parse_file_path_safe(file.filename or "", content)
+        chunks = chunk_text(text)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not chunks:
+        raise HTTPException(status_code=400, detail="文档解析后没有可用文本（可能是扫描件/图片型PDF）")
+
+    doc_id = add_document(file.filename or "unnamed.pdf", len(content), chunks)
+    return {"id": doc_id, "filename": file.filename, "chunk_count": len(chunks), "text_length": len(text)}
+
+
+def parse_file_path_safe(filename: str, content: bytes) -> str:
+    """parse_file 只收路径，这里把上传内容落临时文件再解析"""
+    import tempfile
+    suffix = "." + filename.rsplit(".", 1)[-1].lower()
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+    try:
+        return parse_file(tmp_path)
+    finally:
+        os.unlink(tmp_path)
+
+
+@app.get("/api/kb/documents")
+def kb_list():
+    """文档列表（管理页）"""
+    return list_documents()
+
+
+@app.delete("/api/kb/documents/{doc_id}")
+def kb_delete(doc_id: int):
+    if not delete_document(doc_id):
+        raise HTTPException(status_code=404, detail="文档不存在")
+    return {"deleted": doc_id}
+
+
+@app.delete("/api/kb/documents")
+def kb_clear():
+    return {"cleared": clear_documents()}
 
 
 @app.post("/api/chat")

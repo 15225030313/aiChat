@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 .venv/
 *.tsbuildinfo
+kb_data.sqlite3
+uploads/
