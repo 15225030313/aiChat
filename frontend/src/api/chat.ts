@@ -9,7 +9,11 @@
  * 5. TTFT（首字延迟）埋点：简历量化数据从这里来
  */
 
+import type { SourceRef } from '../types'
+
 export interface StreamCallbacks {
+  /** RAG 模式：流开始时后端先推本次回答引用的知识库片段 */
+  onSources?: (sources: SourceRef[]) => void
   /** 每收到一段增量文本 */
   onDelta?: (text: string) => void
   /** 首个 token 到达，参数为 TTFT 毫秒数 */
@@ -22,6 +26,7 @@ export async function streamChat(
   messages: { role: string; content: string }[],
   signal: AbortSignal,
   callbacks: StreamCallbacks,
+  knowledgeBaseId?: number | null,
 ): Promise<void> {
   const startTime = performance.now()
   let firstTokenAt = 0
@@ -29,7 +34,7 @@ export async function streamChat(
   const res = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify({ messages, knowledge_base_id: knowledgeBaseId ?? null }),
     signal,
   })
 
@@ -71,6 +76,11 @@ export async function streamChat(
           if (parsed.error) {
             callbacks.onError?.(parsed.error)
             return
+          }
+          // RAG 模式首个事件：引用来源元数据
+          if (parsed.type === 'sources' && Array.isArray(parsed.sources)) {
+            callbacks.onSources?.(parsed.sources)
+            continue
           }
           const delta: string | undefined = parsed.choices?.[0]?.delta?.content
           if (delta) {

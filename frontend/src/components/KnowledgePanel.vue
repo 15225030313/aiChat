@@ -5,7 +5,7 @@
  */
 import { onMounted, ref } from 'vue'
 import type { KbDocument } from '../types'
-import { clearDocuments, deleteDocument, listDocuments, uploadDocument } from '../api/kb'
+import { clearDocuments, deleteDocument, listDocuments, uploadDocument, vectorizeDocument } from '../api/kb'
 
 const documents = ref<KbDocument[]>([])
 const loading = ref(false)
@@ -56,6 +56,16 @@ async function handleDelete(id: number) {
     await refresh()
   } catch (e) {
     error.value = e instanceof Error ? e.message : '删除失败'
+  }
+}
+
+async function handleVectorize(id: number) {
+  error.value = ''
+  try {
+    await vectorizeDocument(id)
+    await refresh()
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '向量化失败'
   }
 }
 
@@ -133,7 +143,10 @@ onMounted(refresh)
             </span>
           </td>
           <td>{{ doc.created_at.replace('T', ' ') }}</td>
-          <td><button class="del-btn" @click="handleDelete(doc.id)">删除</button></td>
+          <td>
+            <button v-if="!doc.vectorized" class="vec-btn" @click="handleVectorize(doc.id)">向量化</button>
+            <button class="del-btn" @click="handleDelete(doc.id)">删除</button>
+          </td>
         </tr>
       </tbody>
     </table>
@@ -284,6 +297,23 @@ onMounted(refresh)
 .badge.pending {
   background: #faeeda;
   color: #ba7517;
+}
+
+.vec-btn {
+  border: 1px solid #d7ede9;
+  background: #f2faf8;
+  color: #0e8a7b;
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  margin-right: 8px;
+  transition: all 0.15s;
+}
+
+.vec-btn:hover {
+  background: #e6f7f4;
+  border-color: #16b8a6;
 }
 
 .del-btn {

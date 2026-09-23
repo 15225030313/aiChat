@@ -7,3 +7,4 @@ __pycache__/
 *.tsbuildinfo
 kb_data.sqlite3
 uploads/
+chroma_data/

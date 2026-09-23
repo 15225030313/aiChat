@@ -4,6 +4,21 @@ export interface ChatMessage {
   content: string
   /** 推理模型（如 deepseek-reasoner）的思维链内容，前端单独渲染「思考过程」 */
   reasoning?: string
+  /** RAG 模式下本条回答引用的知识库片段（由后端流式首事件推送） */
+  sources?: SourceRef[]
+}
+
+/** 知识库检索引用（来源溯源） */
+export interface SourceRef {
+  /** 编号，对应答案里的 [1] [2] */
+  index: number
+  doc_id: number
+  filename: string
+  chunk_index: number
+  /** 余弦相似度 0~1 */
+  similarity: number
+  /** 原文片段（截断） */
+  snippet: string
 }
 
 /** 知识库文档（管理页列表项） */

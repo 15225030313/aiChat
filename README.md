@@ -23,6 +23,7 @@ cp .env.example .env
 cd backend
 pip install -r requirements.txt
 python -m uvicorn main:app --reload --port 8000
+C:/Users/周臣超/.workbuddy/binaries/python/envs/default/Scripts/python.exe -m uvicorn main:app --port 8000
 ```
 
 ### 3. 启动前端（端口 5173）

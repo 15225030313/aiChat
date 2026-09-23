@@ -10,7 +10,7 @@ import { ref } from 'vue'
 import type { ChatMessage } from '../types'
 import { streamChat } from '../api/chat'
 
-export function useChat(systemPrompt?: string) {
+export function useChat() {
   const messages = ref<ChatMessage[]>([])
   const isLoading = ref(false)
   const error = ref('')
@@ -19,7 +19,7 @@ export function useChat(systemPrompt?: string) {
 
   let controller: AbortController | null = null
 
-  async function sendMessage(content: string) {
+  async function sendMessage(content: string, knowledgeBaseId?: number | null) {
     const trimmed = content.trim()
     if (!trimmed || isLoading.value) return
 
@@ -33,26 +33,33 @@ export function useChat(systemPrompt?: string) {
 
     controller = new AbortController()
 
-    // 发送给后端的历史：可选 system 提示词 + 全部对话（不含空 assistant 占位）
-    const history = [
-      ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
-      ...messages.value
-        .filter((m) => m !== assistantMsg && !(m.role === 'assistant' && !m.content))
-        .map((m) => ({ role: m.role, content: m.content })),
-    ]
+    // 发送给后端的历史：全部对话（不含空 assistant 占位）
+    // RAG 模式下 system 提示词由后端检索后动态拼装，前端不用传
+    const history = messages.value
+      .filter((m) => m !== assistantMsg && !(m.role === 'assistant' && !m.content))
+      .map((m) => ({ role: m.role, content: m.content }))
 
     try {
-      await streamChat(history, controller.signal, {
-        onDelta(text) {
-          assistantMsg.content += text
+      await streamChat(
+        history,
+        controller.signal,
+        {
+          onSources(sources) {
+            // 引用元数据先于正文到达，挂到本条回答上供溯源 UI 展示
+            assistantMsg.sources = sources
+          },
+          onDelta(text) {
+            assistantMsg.content += text
+          },
+          onFirstToken(ms) {
+            ttft.value = ms
+          },
+          onError(message) {
+            error.value = message
+          },
         },
-        onFirstToken(ms) {
-          ttft.value = ms
-        },
-        onError(message) {
-          error.value = message
-        },
-      })
+        knowledgeBaseId,
+      )
     } catch (err) {
       // AbortError 是用户主动停止，不算异常
       if (err instanceof DOMException && err.name === 'AbortError') {

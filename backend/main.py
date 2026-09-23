@@ -17,8 +17,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from rag import vector_store
 from rag.kb_store import add_document, clear_documents, delete_document, list_documents, save_upload_file
 from rag.parse import chunk_text, parse_file
+from rag.rerank import rerank
 
 load_dotenv()
 
@@ -45,6 +47,8 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
+    """知识库 id：不传/为 null 时走普通对话，传了就走 RAG 检索问答"""
+    knowledge_base_id: int | None = None
 
 
 @app.get("/api/health")
@@ -80,7 +84,25 @@ async def kb_upload(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="文档解析后没有可用文本（可能是扫描件/图片型PDF）")
 
     doc_id = add_document(file.filename or "unnamed.pdf", len(content), chunks)
-    return {"id": doc_id, "filename": file.filename, "chunk_count": len(chunks), "text_length": len(text)}
+
+    # 上传后立即向量化入 Chroma（分片少时秒级完成）
+    vectorized = 0
+    vector_error = ""
+    try:
+        vectorized = vector_store.vectorize_document(doc_id)
+    except Exception as e:  # 向量化失败不阻塞上传，文档保持「待处理」可手动重试
+        vector_error = str(e)
+
+    result = {
+        "id": doc_id,
+        "filename": file.filename,
+        "chunk_count": len(chunks),
+        "text_length": len(text),
+        "vectorized": vectorized,
+    }
+    if vector_error:
+        result["vector_error"] = vector_error
+    return result
 
 
 def parse_file_path_safe(filename: str, content: bytes) -> str:
@@ -106,21 +128,72 @@ def kb_list():
 def kb_delete(doc_id: int):
     if not delete_document(doc_id):
         raise HTTPException(status_code=404, detail="文档不存在")
+    vector_store.delete_doc(doc_id)  # 同步删除 Chroma 里的向量
     return {"deleted": doc_id}
 
 
 @app.delete("/api/kb/documents")
 def kb_clear():
-    return {"cleared": clear_documents()}
+    count = clear_documents()
+    vector_store.clear_all()  # 同步清空向量库
+    return {"cleared": count}
+
+
+@app.post("/api/kb/vectorize/{doc_id}")
+def kb_vectorize(doc_id: int):
+    """手动向量化：补处理上传时向量化失败/历史遗留的「待处理」文档"""
+    try:
+        count = vector_store.vectorize_document(doc_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"doc_id": doc_id, "vectorized": count}
+
+
+RAG_SYSTEM_PROMPT = """你是一个企业知识库问答助手。请严格根据下面的参考资料回答用户问题，并在答案中用 [1]、[2] 这样的编号标注引用了哪条资料。如果参考资料中没有相关内容，请直接回答「知识库中没有找到相关资料」，不要编造。
+
+参考资料：
+{context}"""
+
+
+def build_rag_context(question: str) -> tuple[str, list[dict]]:
+    """
+    RAG 检索两级漏斗：问题向量化 → Chroma 粗排召回 Top20 → Rerank 精排取 Top5。
+    返回 (拼好的 context 文本, sources 元数据列表)。
+    """
+    candidates = vector_store.search(question, top_n=20)
+    if not candidates:
+        return "", []
+    hits = rerank(question, candidates, top_n=5)
+
+    blocks: list[str] = []
+    sources: list[dict] = []
+    for i, hit in enumerate(hits, start=1):
+        # Rerank 命中时展示精排分，否则展示粗排余弦相似度
+        score = hit.get("rerank_score", hit["similarity"])
+        blocks.append(f"[{i}] （来源：{hit['filename']}，相关度 {score:.2f}）\n{hit['text']}")
+        sources.append(
+            {
+                "index": i,
+                "doc_id": hit["doc_id"],
+                "filename": hit["filename"],
+                "chunk_index": hit["chunk_index"],
+                "similarity": score,
+                # 截断展示用，点击角标时前端展示这段
+                "snippet": hit["text"][:300],
+            }
+        )
+    return "\n\n".join(blocks), sources
 
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
     """
-    流式对话接口（SSE）
-
-    前端 POST 过来对话历史，后端透传给 DeepSeek 的流式接口，
-    再把 OpenAI 兼容格式的 SSE 数据一行行转发回去。
+    流式对话接口（SSE），双模式：
+    - knowledge_base_id 为空：普通对话，直接透传 DeepSeek
+    - 传了 kb id：先检索知识库，把参考片段拼进 system prompt 再流式回答；
+      流的第一个事件是 {"type":"sources","sources":[...]}，前端用来渲染引用溯源
     """
     if not DEEPSEEK_API_KEY or DEEPSEEK_API_KEY.startswith("sk-xxxx"):
         raise HTTPException(
@@ -128,9 +201,23 @@ def chat(req: ChatRequest):
             detail="未配置 API Key：请复制 backend/.env.example 为 backend/.env 并填入 DEEPSEEK_API_KEY",
         )
 
+    msgs = [m.model_dump() for m in req.messages]
+    sources: list[dict] = []
+
+    if req.knowledge_base_id is not None:
+        # RAG 模式：取最后一条用户消息作为检索问题
+        question = next((m["content"] for m in reversed(msgs) if m["role"] == "user"), "")
+        if not question:
+            raise HTTPException(status_code=400, detail="没有可检索的用户问题")
+        context, sources = build_rag_context(question)
+        if not context:
+            raise HTTPException(status_code=400, detail="知识库为空或尚未向量化，请先在管理页上传/向量化文档")
+        # RAG 的灵魂就这几行：检索结果以 system 角色注入，模型只能「开卷作答」
+        msgs = [{"role": "system", "content": RAG_SYSTEM_PROMPT.format(context=context)}] + msgs
+
     payload = {
         "model": DEEPSEEK_MODEL,
-        "messages": [m.model_dump() for m in req.messages],
+        "messages": msgs,
         "stream": True,
     }
     headers = {
@@ -139,6 +226,10 @@ def chat(req: ChatRequest):
     }
 
     def stream_upstream():
+        # RAG 模式：先推引用元数据事件，前端据此渲染 [1][2] 角标对应的来源
+        if sources:
+            yield f"data: {json.dumps({'type': 'sources', 'sources': sources}, ensure_ascii=False)}\n\n"
+
         """逐块读取上游 SSE 并透传给前端"""
         with httpx.Client(timeout=httpx.Timeout(60.0, read=300.0)) as client:
             with client.stream(

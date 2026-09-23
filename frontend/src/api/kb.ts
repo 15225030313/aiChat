@@ -21,6 +21,21 @@ export async function clearDocuments(): Promise<void> {
   if (!res.ok) throw new Error(`清空失败（${res.status}）`)
 }
 
+/** 手动向量化：补处理上传时向量化失败/历史遗留的「待处理」文档 */
+export async function vectorizeDocument(id: number): Promise<void> {
+  const res = await fetch(`/api/kb/vectorize/${id}`, { method: 'POST' })
+  if (!res.ok) {
+    let detail = `向量化失败（${res.status}）`
+    try {
+      const body = await res.json()
+      if (body?.detail) detail = body.detail
+    } catch {
+      /* 忽略 */
+    }
+    throw new Error(detail)
+  }
+}
+
 export function uploadDocument(
   file: File,
   onProgress?: (percent: number) => void,

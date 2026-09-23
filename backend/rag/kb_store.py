@@ -84,6 +84,28 @@ def get_chunks(doc_id: int) -> list[str]:
     return [r["text"] for r in rows]
 
 
+def get_doc_filename(doc_id: int) -> str | None:
+    """查文档名（检索结果溯源展示用）"""
+    with _conn() as conn:
+        row = conn.execute("SELECT filename FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    return row["filename"] if row else None
+
+
+def mark_vectorized(doc_id: int) -> None:
+    """向量化完成后打标记"""
+    with _conn() as conn:
+        conn.execute("UPDATE documents SET vectorized = 1 WHERE id = ?", (doc_id,))
+
+
+def get_unvectorized_documents() -> list[dict]:
+    """所有还没向量化的文档（管理页「一键向量化」用）"""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT id, filename, chunk_count FROM documents WHERE vectorized = 0 ORDER BY id"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def delete_document(doc_id: int) -> bool:
     """删除文档及其分片，返回是否确实删了东西"""
     with _conn() as conn:

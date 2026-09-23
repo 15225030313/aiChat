@@ -28,3 +28,21 @@ export function renderMarkdown(text: string): string {
   if (!text) return ''
   return marked.parse(text, { async: false })
 }
+
+/**
+ * 渲染并把正文里的 [1] [2] 引用编号转成可点击角标（RAG 来源溯源）。
+ * 注意要跳过代码块/行内代码——代码里出现 [0] 之类的数组下标是常态，不能误伤。
+ */
+export function renderMarkdownWithCitations(text: string): string {
+  const html = renderMarkdown(text)
+  if (!html) return ''
+  // 按代码段切分：只有代码外的文本做替换
+  return html
+    .split(/(<code[\s\S]*?<\/code>)/g)
+    .map((seg) =>
+      seg.startsWith('<code')
+        ? seg
+        : seg.replace(/\[(\d{1,2})\]/g, '<sup class="cite-ref" data-idx="$1">[$1]</sup>'),
+    )
+    .join('')
+}

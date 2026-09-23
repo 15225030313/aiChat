@@ -5,15 +5,56 @@
  *   （判断逻辑：scrollHeight - scrollTop - clientHeight < 阈值 即认为「贴底」）
  * - 用户主动发送消息时，无论当前在哪里都强制回到底部
  */
-import { ref, nextTick, watch } from 'vue'
+import { ref, nextTick, watch, onMounted } from 'vue'
 import { useChat } from './composables/useChat'
-import { renderMarkdown } from './utils/markdown'
+import { renderMarkdownWithCitations } from './utils/markdown'
 import KnowledgePanel from './components/KnowledgePanel.vue'
+import { listDocuments } from './api/kb'
+import type { ChatMessage, KbDocument, SourceRef } from './types'
 
 /** 顶部导航：对话 / 知识库（后续页面多了再换 vue-router） */
 const activeTab = ref<'chat' | 'kb'>('chat')
 
 const { messages, isLoading, error, ttft, sendMessage, stopGeneration, clearMessages } = useChat()
+
+// ===== 知识库选择（RAG 模式开关）=====
+const kbDocs = ref<KbDocument[]>([])
+const kbError = ref('')
+/** null = 不用知识库（普通对话）；选中的文档必须是已向量化的 */
+const selectedKbId = ref<number | null>(null)
+
+async function loadKbDocs() {
+  kbError.value = ''
+  try {
+    kbDocs.value = await listDocuments()
+    // 当前选中的文档被删除/未向量化时，自动回落到普通对话
+    const cur = kbDocs.value.find((d) => d.id === selectedKbId.value)
+    if (!cur || !cur.vectorized) selectedKbId.value = null
+  } catch (e) {
+    kbError.value = e instanceof Error ? e.message : '知识库列表加载失败'
+  }
+}
+
+onMounted(loadKbDocs)
+// 从知识库页切回对话页时刷新列表（上传/删除后状态可能变了）
+watch(activeTab, (t) => {
+  if (t === 'chat') loadKbDocs()
+})
+
+// ===== 引用溯源：点击角标/来源chip弹窗看原文 =====
+const activeSource = ref<SourceRef | null>(null)
+
+/**
+ * 正文角标点击（事件委托在 v-html 容器上）：
+ * sup.cite-ref 带 data-idx，据此在本条消息的 sources 里找对应引用
+ */
+function handleCiteClick(msg: ChatMessage, e: MouseEvent) {
+  const target = e.target as HTMLElement
+  const idx = target.dataset?.idx
+  if (!idx) return
+  const source = msg.sources?.find((s) => s.index === Number(idx))
+  if (source) activeSource.value = source
+}
 
 const input = ref('')
 const listRef = ref<HTMLElement>()
@@ -38,7 +79,7 @@ async function handleSend() {
   isNearBottom.value = true
   await nextTick()
   scrollToBottom()
-  await sendMessage(content)
+  await sendMessage(content, selectedKbId.value)
 }
 
 function handleKeydown(e: KeyboardEvent) {
@@ -106,8 +147,21 @@ async function backToBottom() {
           <div
             v-else
             class="content markdown-body"
-            v-html="renderMarkdown(msg.content)"
+            v-html="renderMarkdownWithCitations(msg.content)"
+            @click="handleCiteClick(msg, $event)"
           />
+          <!-- 来源溯源：答案引用的知识库片段 -->
+          <div v-if="msg.sources?.length" class="sources">
+            <span class="sources-label">引用来源</span>
+            <button
+              v-for="s in msg.sources"
+              :key="s.index"
+              class="source-chip"
+              @click="activeSource = s"
+            >
+              [{{ s.index }}] {{ s.filename }}
+            </button>
+          </div>
           <span v-if="msg.role === 'assistant' && isLoading && i === messages.length - 1" class="cursor" />
         </div>
       </div>
@@ -121,6 +175,17 @@ async function backToBottom() {
     </button>
 
     <footer class="chat-input">
+      <!-- 知识库选择器：选中即进入 RAG 检索问答模式 -->
+      <div class="kb-selector">
+        <span class="kb-icon">📚</span>
+        <select v-model="selectedKbId" class="kb-select" :disabled="isLoading">
+          <option :value="null">普通对话（不使用知识库）</option>
+          <option v-for="d in kbDocs" :key="d.id" :value="d.id" :disabled="!d.vectorized">
+            {{ d.filename }}（{{ d.chunk_count }} 片{{ d.vectorized ? '' : ' · 待向量化' }}）
+          </option>
+        </select>
+        <span v-if="selectedKbId" class="kb-mode-tag">RAG 检索模式</span>
+      </div>
       <div class="input-box" :class="{ focused: input.trim() }">
         <textarea
           v-model="input"
@@ -141,6 +206,18 @@ async function backToBottom() {
       </div>
     </footer>
     </template>
+
+    <!-- 引用溯源弹窗：点击 [n] 角标查看原文片段 -->
+    <div v-if="activeSource" class="source-mask" @click.self="activeSource = null">
+      <div class="source-modal">
+        <header class="source-head">
+          <span class="source-title">[{{ activeSource.index }}] {{ activeSource.filename }} · 第{{ activeSource.chunk_index + 1 }}片</span>
+          <button class="source-close" @click="activeSource = null">✕</button>
+        </header>
+        <p class="source-sim">相关度 {{ (activeSource.similarity * 100).toFixed(1) }}%</p>
+        <p class="source-snippet">{{ activeSource.snippet }}</p>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -384,6 +461,136 @@ async function backToBottom() {
 .back-bottom:hover {
   color: #16b8a6;
   border-color: #16b8a6;
+}
+
+/* ===== 知识库选择器 ===== */
+.kb-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 0 4px;
+}
+
+.kb-icon {
+  font-size: 14px;
+}
+
+.kb-select {
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  background: #fff;
+  color: #606266;
+  font-size: 13px;
+  padding: 5px 10px;
+  max-width: 420px;
+  cursor: pointer;
+  outline: none;
+}
+
+.kb-select:focus {
+  border-color: #16b8a6;
+}
+
+.kb-mode-tag {
+  font-size: 12px;
+  color: #16b8a6;
+  background: #e6f7f4;
+  padding: 2px 10px;
+  border-radius: 999px;
+}
+
+/* ===== 引用溯源 ===== */
+.sources {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed #e8eaee;
+}
+
+.sources-label {
+  font-size: 12px;
+  color: #909399;
+}
+
+.source-chip {
+  border: 1px solid #d7ede9;
+  background: #f2faf8;
+  color: #0e8a7b;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.source-chip:hover {
+  background: #e6f7f4;
+  border-color: #16b8a6;
+}
+
+.source-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.source-modal {
+  width: min(560px, 92vw);
+  max-height: 70vh;
+  overflow-y: auto;
+  background: #fff;
+  border-radius: 14px;
+  padding: 16px 18px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+
+.source-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.source-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: #303133;
+}
+
+.source-close {
+  border: none;
+  background: none;
+  color: #909399;
+  cursor: pointer;
+  font-size: 15px;
+}
+
+.source-close:hover {
+  color: #303133;
+}
+
+.source-sim {
+  font-size: 12px;
+  color: #16b8a6;
+  margin: 6px 0 10px;
+}
+
+.source-snippet {
+  font-size: 13px;
+  line-height: 1.7;
+  color: #606266;
+  white-space: pre-wrap;
+  background: #f7f8fa;
+  border-radius: 8px;
+  padding: 12px;
 }
 
 /* ===== 输入区 ===== */
